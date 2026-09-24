@@ -62,3 +62,24 @@ validate-study:
 
 validate-artifacts:
 	PYTHONPATH=$$PWD/src python scripts/validate_artifact_screening.py
+
+validate-cell-consensus:
+	PYTHONPATH=$$PWD/src python scripts/validate_cell_consensus.py
+
+validate-cell-review:
+	PYTHONPATH=$$PWD/src python scripts/validate_cell_review.py
+
+report-contract:
+	PYTHONPATH=$$PWD/src python scripts/build_report_contract.py
+
+validate-report-contract:
+	PYTHONPATH=$$PWD/src python scripts/validate_report_contract.py
+
+canonical-cells:
+	PYTHONPATH=$$PWD/src python scripts/finalize_canonical_cells.py
+
+canonical-cells-status:
+	PYTHONPATH=$$PWD/src python scripts/finalize_canonical_cells.py --status
+
+validate-canonical-cells:
+	PYTHONPATH=$$PWD/src python scripts/validate_canonical_cells.py

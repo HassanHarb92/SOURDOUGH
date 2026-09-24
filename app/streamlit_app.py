@@ -152,11 +152,34 @@ if not files:
 # ---------------------------------------------------------------------------
 from pathlib import Path as _SDPath
 import json as _sd_json
+import numpy as _sd_np
 import pandas as _sd_pd
+import plotly.graph_objects as _sd_go
 
 from yeast_xrf.analysis.study_analysis import (
     analyze_study as _sd_analyze_study,
     discover_scans as _sd_discover_scans,
+)
+
+
+from yeast_xrf.analysis.cell_review import (
+    REVIEW_DECISIONS as _SD_REVIEW_DECISIONS,
+    REVIEW_REASONS as _SD_REVIEW_REASONS,
+    ensure_cell_review as _sd_ensure_cell_review,
+    review_summary as _sd_review_summary_fn,
+    save_cell_review as _sd_save_cell_review,
+    bulk_accept_pending_reviews as _sd_bulk_accept_pending_reviews,
+)
+
+
+from yeast_xrf.reporting.report_contract import (
+    refresh_report_contract as _sd_refresh_report_contract,
+)
+from yeast_xrf.analysis.canonical_cells import (
+    CanonicalizationBlockedError as _SDCanonicalizationBlockedError,
+    canonicalization_status as _sd_canonicalization_status,
+    finalize_canonical_cells as _sd_finalize_canonical_cells,
+    preview_canonicalization as _sd_preview_canonicalization,
 )
 
 
@@ -600,6 +623,13 @@ if _sd_mode == "RESULTS":
     _sd_ce = _sd_read_table("cell_elements")
     _sd_pairs_df = _sd_read_table("element_pairs")
     _sd_artifacts = _sd_read_table("artifact_candidates")
+    _sd_consensus = _sd_read_table("cell_consensus")
+    _sd_consensus_support = _sd_read_table(
+        "cell_channel_support"
+    )
+    _sd_consensus_scans = _sd_read_table(
+        "cell_consensus_scans"
+    )
     _sd_qc = _sd_read_table("qc_flags")
     _sd_failures = _sd_read_table("failures")
 
@@ -611,6 +641,9 @@ if _sd_mode == "RESULTS":
             "Element Pairs",
             "QC & Failures",
             "Files & Provenance",
+            "Cell Consensus",
+            "Report Contract",
+            "Canonical Cells",
         ]
     )
 
@@ -905,6 +938,17 @@ if _sd_mode == "RESULTS":
             "scan_elements.csv",
             "element_pairs.csv",
             "artifact_candidates.csv",
+            "cell_consensus.csv",
+            "cell_channel_support.csv",
+            "cell_consensus_scans.csv",
+            "cell_review.csv",
+            "report/report_manifest.json",
+            "report/report_status.csv",
+            "report/REPORT_SKELETON.md",
+            "canonical_cells.csv",
+            "canonical_cell_lineage.csv",
+            "canonicalization_summary.json",
+            "canonical_cell_masks.npz",
             "qc_flags.csv",
             "failures.csv",
         ):
@@ -916,6 +960,1295 @@ if _sd_mode == "RESULTS":
         if _sd_prov.is_file():
             with st.expander("Study provenance", expanded=False):
                 st.json(_sd_json.loads(_sd_prov.read_text()))
+
+
+    with _sd_tabs[6]:
+        st.markdown("#### Multichannel Cell Consensus")
+        st.caption(
+            "Automated TFY + P + S + K cell-existence consensus. "
+            "This is a review layer, not final canonical truth. "
+            "Localized elements such as Zn, Fe, and Ca are not required "
+            "to outline the whole cell."
+        )
+
+        if _sd_consensus.empty:
+            st.info(
+                "This study run has no multichannel consensus output. "
+                "It likely predates Change 13A. Run a new ANALYZE study "
+                "with the current pipeline to populate this view."
+            )
+        else:
+            _sd_review = _sd_ensure_cell_review(
+                _sd_run,
+                _sd_consensus,
+            )
+            _sd_review_summary = _sd_review_summary_fn(
+                _sd_review
+            )
+
+            _sd_review_metrics = st.columns(5)
+            _sd_review_metrics[0].metric(
+                "Reviewed",
+                (
+                    f"{_sd_review_summary['reviewed']} / "
+                    f"{_sd_review_summary['candidate_count']}"
+                ),
+            )
+            _sd_review_metrics[1].metric(
+                "Accepted",
+                _sd_review_summary["accept"],
+            )
+            _sd_review_metrics[2].metric(
+                "Rejected",
+                _sd_review_summary["reject"],
+            )
+            _sd_review_metrics[3].metric(
+                "Ambiguous",
+                _sd_review_summary["ambiguous"],
+            )
+            _sd_review_metrics[4].metric(
+                "Pending",
+                _sd_review_summary["pending"],
+            )
+            st.progress(
+                float(_sd_review_summary["review_fraction"]),
+                text=(
+                    f"Cell review "
+                    f"{100.0 * _sd_review_summary['review_fraction']:.1f}% complete"
+                ),
+            )
+
+
+            with st.expander(
+                "Bulk review actions",
+                expanded=False,
+            ):
+                st.warning(
+                    "Accept all pending marks every candidate that is "
+                    "currently `pending` as `accept` across this study. "
+                    "Existing accepted, rejected, and ambiguous decisions "
+                    "are not changed."
+                )
+
+                _sd_bulk_cols = st.columns([1.2, 1.8])
+                _sd_bulk_reviewer = _sd_bulk_cols[0].text_input(
+                    "Bulk reviewer",
+                    key="results_bulk_accept_reviewer",
+                    placeholder="optional",
+                )
+                _sd_bulk_note = _sd_bulk_cols[1].text_input(
+                    "Bulk review note",
+                    key="results_bulk_accept_note",
+                    placeholder="optional",
+                )
+
+                _sd_bulk_confirm = st.checkbox(
+                    (
+                        "I understand this will accept all "
+                        f"{_sd_review_summary['pending']} currently "
+                        "pending candidates without individual decisions."
+                    ),
+                    key="results_bulk_accept_confirm",
+                    disabled=(
+                        _sd_review_summary["pending"] == 0
+                    ),
+                )
+
+                _sd_bulk_accept_clicked = st.button(
+                    (
+                        "Accept all pending "
+                        f"({_sd_review_summary['pending']})"
+                    ),
+                    type="primary",
+                    key="results_bulk_accept_pending",
+                    disabled=(
+                        _sd_review_summary["pending"] == 0
+                        or not _sd_bulk_confirm
+                    ),
+                )
+
+                if _sd_bulk_accept_clicked:
+                    _sd_bulk_result = (
+                        _sd_bulk_accept_pending_reviews(
+                            _sd_run,
+                            reviewer=_sd_bulk_reviewer,
+                            notes=_sd_bulk_note,
+                        )
+                    )
+                    _sd_refresh_report_contract(_sd_run)
+                    st.success(
+                        "Accepted "
+                        f"{_sd_bulk_result['updated_count']} "
+                        "pending candidate(s). Existing non-pending "
+                        "decisions were preserved."
+                    )
+                    st.rerun()
+
+            _sd_class_counts = (
+                _sd_consensus["consensus_class"]
+                .value_counts()
+                .to_dict()
+                if "consensus_class" in _sd_consensus
+                else {}
+            )
+            _sd_accepted_bool = (
+                _sd_consensus[
+                    "automated_consensus_accept"
+                ]
+                .astype(str)
+                .str.lower()
+                .isin(["true", "1"])
+                if "automated_consensus_accept" in _sd_consensus
+                else _sd_pd.Series(
+                    False,
+                    index=_sd_consensus.index,
+                )
+            )
+
+            _sd_cm = st.columns(6)
+            _sd_cm[0].metric(
+                "Candidates",
+                f"{len(_sd_consensus):,}",
+            )
+            _sd_cm[1].metric(
+                "High confidence",
+                f"{_sd_class_counts.get('high_confidence_cell', 0):,}",
+            )
+            _sd_cm[2].metric(
+                "Accepted",
+                f"{int(_sd_accepted_bool.sum()):,}",
+            )
+            _sd_cm[3].metric(
+                "Ambiguous",
+                f"{_sd_class_counts.get('ambiguous_cell_candidate', 0):,}",
+            )
+            _sd_cm[4].metric(
+                "Channel-specific",
+                f"{_sd_class_counts.get('rejected_channel_specific_object', 0):,}",
+            )
+            _sd_cm[5].metric(
+                "Review",
+                "Pending",
+            )
+
+            st.warning(
+                "Automated acceptance is not the same as a reviewed "
+                "canonical cell. Change 14 will provide accept/reject/"
+                "edit review controls."
+            )
+
+            _sd_cf = st.columns([1.4, 1.8, 1.0])
+            _sd_consensus_scans_available = sorted(
+                _sd_consensus["scan"]
+                .dropna()
+                .astype(str)
+                .unique()
+            )
+            _sd_consensus_scan = _sd_cf[0].selectbox(
+                "Scan",
+                _sd_consensus_scans_available,
+                key="results_consensus_scan",
+            )
+
+            _sd_consensus_classes = sorted(
+                _sd_consensus["consensus_class"]
+                .dropna()
+                .astype(str)
+                .unique()
+            )
+            _sd_consensus_class_filter = _sd_cf[1].multiselect(
+                "Consensus class",
+                _sd_consensus_classes,
+                default=_sd_consensus_classes,
+                key="results_consensus_class_filter",
+            )
+            _sd_consensus_accept_only = _sd_cf[2].checkbox(
+                "Accepted only",
+                value=False,
+                key="results_consensus_accept_only",
+            )
+
+            _sd_consensus_view = _sd_consensus[
+                _sd_consensus["scan"].astype(str)
+                == str(_sd_consensus_scan)
+            ].copy()
+
+            if _sd_consensus_class_filter:
+                _sd_consensus_view = _sd_consensus_view[
+                    _sd_consensus_view["consensus_class"]
+                    .astype(str)
+                    .isin(_sd_consensus_class_filter)
+                ]
+
+            if (
+                _sd_consensus_accept_only
+                and "automated_consensus_accept"
+                in _sd_consensus_view
+            ):
+                _sd_consensus_view = _sd_consensus_view[
+                    _sd_consensus_view[
+                        "automated_consensus_accept"
+                    ]
+                    .astype(str)
+                    .str.lower()
+                    .isin(["true", "1"])
+                ]
+
+            _sd_display_columns = [
+                col
+                for col in (
+                    "consensus_candidate_id",
+                    "automated_cell_id",
+                    "consensus_class",
+                    "automated_consensus_accept",
+                    "review_status",
+                    "consensus_score",
+                    "support_channel_count",
+                    "supporting_channels",
+                    "area_pixels",
+                    "circularity_pixel",
+                    "solidity",
+                    "eccentricity_pixel",
+                    "artifact_overlap_fraction",
+                    "touches_scan_edge",
+                )
+                if col in _sd_consensus_view.columns
+            ]
+
+            if not _sd_review.empty:
+                _sd_review_display = _sd_review[
+                    [
+                        "scan",
+                        "consensus_candidate_id",
+                        "review_decision",
+                        "review_reason",
+                    ]
+                ].copy()
+                _sd_consensus_view = _sd_consensus_view.merge(
+                    _sd_review_display,
+                    on=[
+                        "scan",
+                        "consensus_candidate_id",
+                    ],
+                    how="left",
+                )
+                _sd_display_columns.extend(
+                    [
+                        col
+                        for col in (
+                            "review_decision",
+                            "review_reason",
+                        )
+                        if col not in _sd_display_columns
+                    ]
+                )
+
+            st.dataframe(
+                _sd_consensus_view[_sd_display_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if _sd_consensus_view.empty:
+                st.info(
+                    "No candidates match the current consensus filters."
+                )
+            else:
+                _sd_candidate_options = (
+                    _sd_consensus_view[
+                        "consensus_candidate_id"
+                    ]
+                    .astype(int)
+                    .tolist()
+                )
+                _sd_candidate_id = st.selectbox(
+                    "Inspect candidate",
+                    _sd_candidate_options,
+                    format_func=lambda value: (
+                        f"Candidate {value}"
+                    ),
+                    key="results_consensus_candidate",
+                )
+
+                _sd_candidate_row = (
+                    _sd_consensus_view[
+                        _sd_consensus_view[
+                            "consensus_candidate_id"
+                        ].astype(int)
+                        == int(_sd_candidate_id)
+                    ]
+                    .iloc[0]
+                )
+
+
+                _sd_current_review_rows = _sd_review[
+                    (
+                        _sd_review["scan"].astype(str)
+                        == str(_sd_consensus_scan)
+                    )
+                    & (
+                        _sd_review[
+                            "consensus_candidate_id"
+                        ].astype(int)
+                        == int(_sd_candidate_id)
+                    )
+                ]
+                _sd_current_review = (
+                    _sd_current_review_rows.iloc[0]
+                    if not _sd_current_review_rows.empty
+                    else None
+                )
+
+                st.markdown("##### Human cell review")
+                st.caption(
+                    "Your decision is written immediately to "
+                    "`cell_review.csv`. This does not modify the "
+                    "Change-13A consensus mask and does not yet create "
+                    "a canonical cell. Change 15 will consume accepted "
+                    "reviews."
+                )
+
+                _sd_review_form_key = (
+                    f"cell_review_form_"
+                    f"{_sd_consensus_scan}_"
+                    f"{_sd_candidate_id}"
+                )
+                with st.form(_sd_review_form_key):
+                    _sd_rcols = st.columns([1.0, 1.4, 1.0])
+
+                    _sd_existing_decision = (
+                        str(
+                            _sd_current_review.get(
+                                "review_decision",
+                                "pending",
+                            )
+                        )
+                        if _sd_current_review is not None
+                        else "pending"
+                    )
+                    if (
+                        _sd_existing_decision
+                        not in _SD_REVIEW_DECISIONS
+                    ):
+                        _sd_existing_decision = "pending"
+
+                    _sd_review_decision = _sd_rcols[0].selectbox(
+                        "Review decision",
+                        _SD_REVIEW_DECISIONS,
+                        index=list(
+                            _SD_REVIEW_DECISIONS
+                        ).index(_sd_existing_decision),
+                    )
+
+                    _sd_existing_reason = (
+                        str(
+                            _sd_current_review.get(
+                                "review_reason",
+                                "",
+                            )
+                        )
+                        if _sd_current_review is not None
+                        else ""
+                    )
+                    if (
+                        _sd_existing_reason
+                        not in _SD_REVIEW_REASONS
+                    ):
+                        _sd_existing_reason = ""
+
+                    _sd_review_reason = _sd_rcols[1].selectbox(
+                        "Reason",
+                        _SD_REVIEW_REASONS,
+                        index=list(
+                            _SD_REVIEW_REASONS
+                        ).index(_sd_existing_reason),
+                        format_func=lambda value: (
+                            "—"
+                            if value == ""
+                            else value.replace("_", " ")
+                        ),
+                    )
+
+                    _sd_review_reviewer = _sd_rcols[2].text_input(
+                        "Reviewer",
+                        value=(
+                            str(
+                                _sd_current_review.get(
+                                    "reviewer",
+                                    "",
+                                )
+                            )
+                            if _sd_current_review is not None
+                            else ""
+                        ),
+                        placeholder="optional",
+                    )
+
+                    _sd_review_notes = st.text_area(
+                        "Review notes",
+                        value=(
+                            str(
+                                _sd_current_review.get(
+                                    "review_notes",
+                                    "",
+                                )
+                            )
+                            if _sd_current_review is not None
+                            else ""
+                        ),
+                        placeholder=(
+                            "Why accept/reject/hold this candidate?"
+                        ),
+                    )
+
+                    _sd_review_save = st.form_submit_button(
+                        "Save cell review",
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+                if _sd_review_save:
+                    _sd_save_cell_review(
+                        _sd_run,
+                        scan=str(_sd_consensus_scan),
+                        consensus_candidate_id=int(
+                            _sd_candidate_id
+                        ),
+                        decision=_sd_review_decision,
+                        reason=_sd_review_reason,
+                        notes=_sd_review_notes,
+                        reviewer=_sd_review_reviewer,
+                    )
+                    st.success(
+                        "Cell review saved persistently."
+                    )
+                    st.rerun()
+
+                _sd_d1, _sd_d2 = st.columns(
+                    [1.0, 1.35],
+                    gap="large",
+                )
+
+                with _sd_d1:
+                    st.markdown("##### Candidate evidence")
+                    _sd_ev = st.columns(2)
+
+                    _sd_ev[0].metric(
+                        "Class",
+                        str(
+                            _sd_candidate_row.get(
+                                "consensus_class",
+                                "n/a",
+                            )
+                        ).replace("_", " "),
+                    )
+                    _sd_ev[1].metric(
+                        "Consensus score",
+                        f"{float(_sd_candidate_row.get('consensus_score', float('nan'))):.3f}",
+                    )
+                    _sd_ev[0].metric(
+                        "Supporting channels",
+                        (
+                            f"{int(_sd_candidate_row.get('support_channel_count', 0))}"
+                            f" / "
+                            f"{int(_sd_candidate_row.get('available_support_channel_count', 0))}"
+                        ),
+                    )
+                    _sd_ev[1].metric(
+                        "Area",
+                        f"{int(_sd_candidate_row.get('area_pixels', 0)):,} px",
+                    )
+                    _sd_ev[0].metric(
+                        "Circularity",
+                        f"{float(_sd_candidate_row.get('circularity_pixel', float('nan'))):.3f}",
+                    )
+                    _sd_ev[1].metric(
+                        "Solidity",
+                        f"{float(_sd_candidate_row.get('solidity', float('nan'))):.3f}",
+                    )
+                    _sd_ev[0].metric(
+                        "Artifact overlap",
+                        f"{100.0 * float(_sd_candidate_row.get('artifact_overlap_fraction', 0.0)):.2f}%",
+                    )
+                    _sd_ev[1].metric(
+                        "Border contact",
+                        (
+                            "Yes"
+                            if str(
+                                _sd_candidate_row.get(
+                                    "touches_scan_edge",
+                                    False,
+                                )
+                            ).lower()
+                            in ("true", "1")
+                            else "No"
+                        ),
+                    )
+
+                    st.caption(
+                        "The consensus score is a heuristic ranking "
+                        "value, not a calibrated probability."
+                    )
+
+                with _sd_d2:
+                    st.markdown("##### Channel support")
+                    _sd_support_view = (
+                        _sd_consensus_support[
+                            (
+                                _sd_consensus_support["scan"]
+                                .astype(str)
+                                == str(_sd_consensus_scan)
+                            )
+                            & (
+                                _sd_consensus_support[
+                                    "consensus_candidate_id"
+                                ]
+                                .astype(int)
+                                == int(_sd_candidate_id)
+                            )
+                        ].copy()
+                        if not _sd_consensus_support.empty
+                        else _sd_pd.DataFrame()
+                    )
+
+                    if _sd_support_view.empty:
+                        st.info(
+                            "No per-channel support rows were found "
+                            "for this candidate."
+                        )
+                    else:
+                        _sd_support_cols = [
+                            col
+                            for col in (
+                                "channel",
+                                "support_fraction_of_candidate",
+                                "supports_candidate",
+                                "support_threshold_fraction",
+                            )
+                            if col in _sd_support_view.columns
+                        ]
+                        st.dataframe(
+                            _sd_support_view[_sd_support_cols],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                        if {
+                            "channel",
+                            "support_fraction_of_candidate",
+                        }.issubset(
+                            _sd_support_view.columns
+                        ):
+                            _sd_bar = _sd_go.Figure(
+                                _sd_go.Bar(
+                                    x=_sd_support_view[
+                                        "channel"
+                                    ].astype(str),
+                                    y=_sd_support_view[
+                                        "support_fraction_of_candidate"
+                                    ].astype(float),
+                                    customdata=_sd_support_view[
+                                        "supports_candidate"
+                                    ].astype(str)
+                                    if "supports_candidate"
+                                    in _sd_support_view
+                                    else None,
+                                    hovertemplate=(
+                                        "%{x}<br>"
+                                        "support=%{y:.3f}"
+                                        "<br>passes=%{customdata}"
+                                        "<extra></extra>"
+                                    ),
+                                )
+                            )
+                            _sd_bar.update_layout(
+                                title=(
+                                    "Candidate coverage by "
+                                    "cell-support channel"
+                                ),
+                                yaxis_title=(
+                                    "fraction of candidate area"
+                                ),
+                                xaxis_title="support channel",
+                                yaxis_range=[0, 1],
+                                height=330,
+                                margin=dict(
+                                    l=20,
+                                    r=20,
+                                    t=50,
+                                    b=20,
+                                ),
+                            )
+                            st.plotly_chart(
+                                _sd_bar,
+                                use_container_width=True,
+                                config={"displaylogo": False},
+                                key=(
+                                    "results_consensus_support_bar_"
+                                    f"{_sd_consensus_scan}_"
+                                    f"{_sd_candidate_id}"
+                                ),
+                            )
+
+                def _sd_consensus_stem(_name):
+                    _name = str(_name)
+                    for _suffix in (
+                        ".mda.h5",
+                        ".hdf5",
+                        ".h5",
+                    ):
+                        if _name.endswith(_suffix):
+                            return _name[: -len(_suffix)]
+                    return _SDPath(_name).stem
+
+                _sd_npz_path = (
+                    _sd_run
+                    / "scans"
+                    / _sd_consensus_stem(
+                        _sd_consensus_scan
+                    )
+                    / "cell_masks_multichannel_consensus.npz"
+                )
+
+                st.markdown("##### Saved consensus masks")
+                st.caption(
+                    "These are derived Change-13A artifacts. "
+                    "The UI reads only saved analysis outputs and does not "
+                    "modify raw HDF5."
+                )
+
+                if not _sd_npz_path.is_file():
+                    st.info(
+                        "The saved consensus-mask NPZ was not found "
+                        "for this scan."
+                    )
+                else:
+                    with _sd_np.load(
+                        _sd_npz_path,
+                        allow_pickle=False,
+                    ) as _sd_npz:
+                        _sd_candidate_labels = _sd_np.asarray(
+                            _sd_npz["candidate_labels"]
+                        )
+                        _sd_accepted_labels = _sd_np.asarray(
+                            _sd_npz["accepted_labels"]
+                        )
+                        _sd_support_count = _sd_np.asarray(
+                            _sd_npz["support_count_map"]
+                        )
+
+                        _sd_selected_mask = (
+                            _sd_candidate_labels
+                            == int(_sd_candidate_id)
+                        ).astype(float)
+
+                        _sd_viz = st.columns(4)
+                        _sd_viz_payload = (
+                            (
+                                "Support count",
+                                _sd_support_count,
+                                "Viridis",
+                            ),
+                            (
+                                "All candidates",
+                                _sd_candidate_labels,
+                                "Turbo",
+                            ),
+                            (
+                                "Automated accepted",
+                                _sd_accepted_labels,
+                                "Turbo",
+                            ),
+                            (
+                                f"Candidate {_sd_candidate_id}",
+                                _sd_selected_mask,
+                                "Greys",
+                            ),
+                        )
+
+                        for _sd_col, (
+                            _sd_title,
+                            _sd_array,
+                            _sd_scale,
+                        ) in zip(
+                            _sd_viz,
+                            _sd_viz_payload,
+                        ):
+                            with _sd_col:
+                                _sd_fig = _sd_go.Figure(
+                                    _sd_go.Heatmap(
+                                        z=_sd_array,
+                                        colorscale=_sd_scale,
+                                        showscale=False,
+                                        hovertemplate=(
+                                            "x=%{x}<br>"
+                                            "y=%{y}<br>"
+                                            "value=%{z}"
+                                            "<extra></extra>"
+                                        ),
+                                    )
+                                )
+                                _sd_fig.update_layout(
+                                    title=_sd_title,
+                                    height=300,
+                                    margin=dict(
+                                        l=5,
+                                        r=5,
+                                        t=45,
+                                        b=5,
+                                    ),
+                                    yaxis=dict(
+                                        autorange="reversed",
+                                        scaleanchor="x",
+                                    ),
+                                )
+                                st.plotly_chart(
+                                    _sd_fig,
+                                    use_container_width=True,
+                                    config={
+                                        "displaylogo": False
+                                    },
+                                    key=(
+                                        "results_consensus_mask_"
+                                        f"{_sd_title}_"
+                                        f"{_sd_consensus_scan}_"
+                                        f"{_sd_candidate_id}"
+                                    ),
+                                )
+
+                        _sd_support_keys = sorted(
+                            key
+                            for key in _sd_npz.files
+                            if key.startswith("support__")
+                        )
+
+                        if _sd_support_keys:
+                            st.markdown(
+                                "##### Cell-support masks"
+                            )
+                            _sd_support_panels = st.columns(
+                                len(_sd_support_keys)
+                            )
+                            for _sd_col, _sd_key in zip(
+                                _sd_support_panels,
+                                _sd_support_keys,
+                            ):
+                                _sd_channel = _sd_key.replace(
+                                    "support__",
+                                    "",
+                                    1,
+                                )
+                                with _sd_col:
+                                    _sd_support_fig = (
+                                        _sd_go.Figure(
+                                            _sd_go.Heatmap(
+                                                z=_sd_np.asarray(
+                                                    _sd_npz[
+                                                        _sd_key
+                                                    ]
+                                                ),
+                                                colorscale="Greys",
+                                                zmin=0,
+                                                zmax=1,
+                                                showscale=False,
+                                                hovertemplate=(
+                                                    "x=%{x}<br>"
+                                                    "y=%{y}<br>"
+                                                    "support=%{z}"
+                                                    "<extra></extra>"
+                                                ),
+                                            )
+                                        )
+                                    )
+                                    _sd_support_fig.update_layout(
+                                        title=_sd_channel,
+                                        height=280,
+                                        margin=dict(
+                                            l=5,
+                                            r=5,
+                                            t=40,
+                                            b=5,
+                                        ),
+                                        yaxis=dict(
+                                            autorange="reversed",
+                                            scaleanchor="x",
+                                        ),
+                                    )
+                                    st.plotly_chart(
+                                        _sd_support_fig,
+                                        use_container_width=True,
+                                        config={
+                                            "displaylogo": False
+                                        },
+                                        key=(
+                                            "results_consensus_"
+                                            "supportmask_"
+                                            f"{_sd_channel}_"
+                                            f"{_sd_consensus_scan}"
+                                        ),
+                                    )
+
+            if not _sd_consensus_scans.empty:
+                with st.expander(
+                    "Scan-level consensus summary",
+                    expanded=False,
+                ):
+                    st.dataframe(
+                        _sd_consensus_scans,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+
+    with _sd_tabs[7]:
+        st.markdown("#### Final Report Contract")
+        st.caption(
+            "This locks down the collaborator-facing report structure now. "
+            "Later scientific changes populate the same report schema instead "
+            "of inventing reporting at the end."
+        )
+
+        _sd_report_manifest_path = (
+            _sd_run
+            / "report"
+            / "report_manifest.json"
+        )
+
+        _sd_report_controls = st.columns([1.0, 3.0])
+        if _sd_report_controls[0].button(
+            "Refresh report contract",
+            key="results_refresh_report_contract",
+            use_container_width=True,
+        ):
+            _sd_refresh_report_contract(_sd_run)
+            st.success("Report contract refreshed.")
+            st.rerun()
+
+        if not _sd_report_manifest_path.is_file():
+            _sd_refresh_report_contract(_sd_run)
+
+        _sd_report_manifest = _sd_json.loads(
+            _sd_report_manifest_path.read_text()
+        )
+
+        _sd_sections = _sd_pd.DataFrame(
+            _sd_report_manifest["sections"]
+        )
+        _sd_status_counts = (
+            _sd_sections["status"]
+            .value_counts()
+            .to_dict()
+        )
+
+        _sd_rm = st.columns(4)
+        _sd_rm[0].metric(
+            "Report sections",
+            len(_sd_sections),
+        )
+        _sd_rm[1].metric(
+            "Ready",
+            _sd_status_counts.get("ready", 0),
+        )
+        _sd_rm[2].metric(
+            "Partial",
+            _sd_status_counts.get("partial", 0),
+        )
+        _sd_rm[3].metric(
+            "Planned",
+            _sd_status_counts.get("planned", 0),
+        )
+
+        st.info(
+            "The final report is intentionally NOT marked ready yet. "
+            "Cell-level biology downstream of segmentation must be "
+            "recomputed from reviewed canonical cells."
+        )
+
+        _sd_status_display = _sd_sections[
+            [
+                "title",
+                "status",
+                "status_note",
+                "planned_change",
+                "available_inputs",
+                "missing_final_inputs",
+            ]
+        ].copy()
+        _sd_status_display["available_inputs"] = (
+            _sd_status_display["available_inputs"]
+            .apply(
+                lambda value: ", ".join(value)
+                if isinstance(value, list)
+                else str(value)
+            )
+        )
+        _sd_status_display["missing_final_inputs"] = (
+            _sd_status_display["missing_final_inputs"]
+            .apply(
+                lambda value: ", ".join(value)
+                if isinstance(value, list)
+                else str(value)
+            )
+        )
+
+        st.dataframe(
+            _sd_status_display,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("##### Reporting rules")
+        _sd_policy = _sd_report_manifest[
+            "report_policy"
+        ]
+        st.markdown(
+            "\n".join(
+                [
+                    "- Every claim must trace to saved analysis artifacts.",
+                    "- Canonical cells are required for final cell-level analysis.",
+                    "- Raw HDF5 remains unchanged.",
+                    "- Unverified physical units are not invented.",
+                    "- 2D XRF does not become physical volume without an explicit model.",
+                    "- Organelle output is organelle-likeness, not definitive identity.",
+                    "- Heuristic scores are not called probabilities unless calibrated.",
+                ]
+            )
+        )
+
+        st.markdown("##### Stable report workspace")
+        st.code(
+            "\n".join(
+                [
+                    "report/",
+                    "  report_manifest.json",
+                    "  report_status.csv",
+                    "  REPORT_SKELETON.md",
+                    "  figures/",
+                    "  tables/",
+                    "  cells/",
+                    "  samples/",
+                    "  conditions/",
+                    "  appendix/",
+                ]
+            ),
+            language=None,
+        )
+
+        st.markdown("##### Planned final deliverables")
+        st.write(
+            _sd_report_manifest[
+                "planned_final_deliverables"
+            ]
+        )
+
+        _sd_skeleton_path = (
+            _sd_run
+            / "report"
+            / "REPORT_SKELETON.md"
+        )
+        if _sd_skeleton_path.is_file():
+            with st.expander(
+                "Preview report skeleton",
+                expanded=False,
+            ):
+                st.markdown(
+                    _sd_skeleton_path.read_text()
+                )
+
+
+    with _sd_tabs[8]:
+        st.markdown("#### Canonical Cell Dataset")
+        st.caption(
+            "This is the authoritative cell-population boundary. "
+            "Only human-reviewed `accept` candidates become canonical. "
+            "Change-13A masks are copied without editing."
+        )
+
+        if _sd_consensus.empty:
+            st.info(
+                "No multichannel cell consensus is available for "
+                "canonicalization."
+            )
+        else:
+            _sd_review = _sd_ensure_cell_review(
+                _sd_run,
+                _sd_consensus,
+            )
+            _sd_preview = _sd_preview_canonicalization(
+                _sd_run
+            )
+            _sd_canon_status = _sd_canonicalization_status(
+                _sd_run
+            )
+
+            _sd_ccm = st.columns(6)
+            _sd_ccm[0].metric(
+                "Candidates",
+                _sd_preview["candidate_count"],
+            )
+            _sd_ccm[1].metric(
+                "Accept",
+                _sd_preview["accepted_count"],
+            )
+            _sd_ccm[2].metric(
+                "Reject",
+                _sd_preview["rejected_count"],
+            )
+            _sd_ccm[3].metric(
+                "Ambiguous",
+                _sd_preview["ambiguous_count"],
+            )
+            _sd_ccm[4].metric(
+                "Pending",
+                _sd_preview["pending_count"],
+            )
+            _sd_ccm[5].metric(
+                "Canonical",
+                _sd_canon_status.canonical_cell_count,
+            )
+
+            if _sd_canon_status.finalized:
+                st.success(
+                    "Canonical cell dataset is finalized and current."
+                )
+            elif _sd_canon_status.stale:
+                st.error(
+                    "The existing canonical dataset is stale because "
+                    "review/consensus inputs changed. Re-finalize after "
+                    "resolving the current review state."
+                )
+            elif _sd_preview["can_finalize"]:
+                st.info(
+                    "All candidates are resolved. Canonicalization can "
+                    "now be finalized."
+                )
+            else:
+                st.warning(
+                    "Canonicalization is blocked until every pending "
+                    "and ambiguous candidate is resolved in Cell Consensus."
+                )
+
+            st.markdown("##### Review disposition")
+            st.dataframe(
+                _sd_review[
+                    [
+                        "scan",
+                        "consensus_candidate_id",
+                        "source_consensus_class",
+                        "source_consensus_score",
+                        "review_decision",
+                        "review_reason",
+                        "reviewer",
+                        "reviewed_at_utc",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            _sd_finalize_cols = st.columns([1.0, 2.7])
+            _sd_finalize_clicked = _sd_finalize_cols[0].button(
+                (
+                    "Re-finalize canonical cells"
+                    if _sd_canon_status.exists
+                    else "Finalize canonical cells"
+                ),
+                type="primary",
+                disabled=not _sd_preview["can_finalize"],
+                use_container_width=True,
+                key="results_finalize_canonical_cells",
+            )
+            _sd_finalize_cols[1].caption(
+                "Finalization is deterministic: candidates are sorted "
+                "by scan and candidate ID, assigned global CELL_###### "
+                "IDs, and copied into scan-local canonical label masks."
+            )
+
+            if _sd_finalize_clicked:
+                try:
+                    _sd_result = _sd_finalize_canonical_cells(
+                        _sd_run
+                    )
+                    _sd_refresh_report_contract(_sd_run)
+                    st.success(
+                        "Canonical cell dataset finalized: "
+                        f"{len(_sd_result['canonical_cells'])} cell(s)."
+                    )
+                    st.rerun()
+                except _SDCanonicalizationBlockedError as exc:
+                    st.error(str(exc))
+
+            _sd_canonical_path = (
+                _sd_run / "canonical_cells.csv"
+            )
+            _sd_lineage_path = (
+                _sd_run / "canonical_cell_lineage.csv"
+            )
+
+            if _sd_canonical_path.is_file():
+                _sd_canonical_df = _sd_read_table(
+                    "canonical_cells"
+                )
+                st.markdown("##### Canonical cells")
+                if _sd_canonical_df.empty:
+                    st.info(
+                        "Canonicalization is finalized with zero "
+                        "accepted cells."
+                    )
+                else:
+                    _sd_canon_cols = [
+                        col
+                        for col in (
+                            "canonical_cell_id",
+                            "scan",
+                            "canonical_mask_label",
+                            "source_consensus_candidate_id",
+                            "sample_id",
+                            "condition",
+                            "strain_or_mutant",
+                            "treatment",
+                            "pixel_count",
+                            "touches_scan_edge",
+                            "default_complete_cell_population",
+                            "source_consensus_class",
+                            "source_consensus_score",
+                            "review_reason",
+                        )
+                        if col in _sd_canonical_df.columns
+                    ]
+                    st.dataframe(
+                        _sd_canonical_df[_sd_canon_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    _sd_cell_ids = (
+                        _sd_canonical_df[
+                            "canonical_cell_id"
+                        ].astype(str).tolist()
+                    )
+                    _sd_canonical_cell_id = st.selectbox(
+                        "Inspect canonical cell",
+                        _sd_cell_ids,
+                        key="results_canonical_cell_id",
+                    )
+                    _sd_canonical_row = (
+                        _sd_canonical_df[
+                            _sd_canonical_df[
+                                "canonical_cell_id"
+                            ].astype(str)
+                            == _sd_canonical_cell_id
+                        ].iloc[0]
+                    )
+                    _sd_scan_name = str(
+                        _sd_canonical_row["scan"]
+                    )
+                    _sd_scan_stem = _sd_consensus_stem(
+                        _sd_scan_name
+                    )
+                    _sd_scan_mask_path = (
+                        _sd_run
+                        / "scans"
+                        / _sd_scan_stem
+                        / "canonical_cell_masks.npz"
+                    )
+
+                    if _sd_scan_mask_path.is_file():
+                        with _sd_np.load(
+                            _sd_scan_mask_path,
+                            allow_pickle=False,
+                        ) as _sd_mask_payload:
+                            _sd_labels = _sd_np.asarray(
+                                _sd_mask_payload[
+                                    "canonical_labels"
+                                ]
+                            )
+
+                        _sd_local_label = int(
+                            _sd_canonical_row[
+                                "canonical_mask_label"
+                            ]
+                        )
+                        _sd_selected = (
+                            _sd_labels == _sd_local_label
+                        ).astype(float)
+
+                        _sd_mask_cols = st.columns(2)
+                        for _sd_col, _sd_title, _sd_arr in (
+                            (
+                                _sd_mask_cols[0],
+                                "All canonical cells in scan",
+                                _sd_labels,
+                            ),
+                            (
+                                _sd_mask_cols[1],
+                                _sd_canonical_cell_id,
+                                _sd_selected,
+                            ),
+                        ):
+                            with _sd_col:
+                                _sd_fig = _sd_go.Figure(
+                                    _sd_go.Heatmap(
+                                        z=_sd_arr,
+                                        colorscale=(
+                                            "Turbo"
+                                            if _sd_title.startswith("All")
+                                            else "Greys"
+                                        ),
+                                        showscale=False,
+                                    )
+                                )
+                                _sd_fig.update_layout(
+                                    title=_sd_title,
+                                    height=360,
+                                    margin=dict(
+                                        l=5,
+                                        r=5,
+                                        t=45,
+                                        b=5,
+                                    ),
+                                    yaxis=dict(
+                                        autorange="reversed",
+                                        scaleanchor="x",
+                                    ),
+                                )
+                                st.plotly_chart(
+                                    _sd_fig,
+                                    use_container_width=True,
+                                    config={"displaylogo": False},
+                                    key=(
+                                        "canonical_mask_"
+                                        f"{_sd_title}_"
+                                        f"{_sd_canonical_cell_id}"
+                                    ),
+                                )
+
+            if _sd_lineage_path.is_file():
+                with st.expander(
+                    "Canonical lineage for every consensus candidate",
+                    expanded=False,
+                ):
+                    _sd_lineage = _sd_read_table(
+                        "canonical_cell_lineage"
+                    )
+                    st.dataframe(
+                        _sd_lineage,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            st.markdown("##### Scientific boundary")
+            st.markdown(
+                "\n".join(
+                    [
+                        "- Canonical = reviewed cell identity and mask selection.",
+                        "- It does not imply organelle identity.",
+                        "- Accepted border-touching cells remain canonical but are flagged outside the default complete-cell population.",
+                        "- Any later review edit invalidates the previous canonical snapshot until re-finalized.",
+                        "- Changes 16+ must use canonical cells for final cell-level biology.",
+                    ]
+                )
+            )
 
     st.stop()
 

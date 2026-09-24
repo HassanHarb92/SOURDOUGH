@@ -63,6 +63,11 @@ def main():
             "Disable flag-only artifact/contamination candidate screening."
         ),
     )
+    parser.add_argument(
+        "--no-cell-consensus",
+        action="store_true",
+        help="Disable automated TFY/P/S/K cell consensus.",
+    )
     args = parser.parse_args()
 
     result = analyze_study(
@@ -74,6 +79,7 @@ def main():
         save_concentration_arrays=not args.no_arrays,
         compute_element_pairs=not args.no_pairs,
         artifact_screening=not args.no_artifact_screening,
+        multichannel_consensus=not args.no_cell_consensus,
         max_scans=args.max_scans,
     )
 
@@ -92,7 +98,7 @@ def main():
     print(f"Element-pair records: {s['element_pair_records']}")
     print(f"QC flags:             {s['qc_flags']}")
     print()
-    print("Cell masks: provisional TFY-based")
+    print("Cell consensus: TFY/P/S/K; human review pending")
     print("Concentrations: validated MAPS µg/cm²")
     print(f"Output: {result['run_dir']}")
 
