@@ -1,0 +1,27 @@
+name: yeast-xrf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - pandas
+  - scipy
+  - h5py
+  - xarray
+  - dask
+  - scikit-image
+  - scikit-learn
+  - matplotlib
+  - plotly
+  - streamlit
+  - pydantic
+  - pyyaml
+  - typer
+  - rich
+  - zarr
+  - numcodecs
+  - pyarrow
+  - pytest
+  - pip:
+      - -e .

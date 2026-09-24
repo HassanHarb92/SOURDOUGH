@@ -1,0 +1,25 @@
+project:
+  name: yeast-xrf
+  data_dir: img.dat
+  analysis_dir: analysis
+  cache_dir: cache
+  reports_dir: reports
+
+ingest:
+  pattern: "*.h5"
+  recursive: false
+  inventory_attributes: true
+  inventory_dataset_metadata: true
+  deep_numeric_stats: false
+  max_sample_values: 4096
+
+analysis:
+  default_source_role: auto
+  preserve_raw_counts: true
+  physical_units_required_when_available: true
+  epsilon: 1.0e-12
+
+visualization:
+  default_colormap: viridis
+  percentile_low: 1.0
+  percentile_high: 99.0
